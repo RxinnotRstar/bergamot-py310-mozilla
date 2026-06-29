@@ -40,9 +40,11 @@ jobs:
           
           # Create minimal pyproject.toml if it doesn't exist
           if (-not (Test-Path "mozilla-src/inference/pyproject.toml")) {
-            '[build-system]' | Out-File -FilePath "mozilla-src/inference/pyproject.toml" -Encoding utf8
-            'requires = ["setuptools", "wheel"]' | Out-File -FilePath "mozilla-src/inference/pyproject.toml" -Encoding utf8 -Append
-            'build-backend = "setuptools.backends._legacy:_Backend"' | Out-File -FilePath "mozilla-src/inference/pyproject.toml" -Encoding utf8 -Append
+            @'
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+'@ | Out-File -FilePath "mozilla-src/inference/pyproject.toml" -Encoding utf8
             echo "Created minimal pyproject.toml"
           }
           
