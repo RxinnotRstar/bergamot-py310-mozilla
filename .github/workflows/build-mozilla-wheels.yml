@@ -1,0 +1,107 @@
+name: Build Mozilla bergamot v0.6.0 wheel
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+jobs:
+  build_windows:
+    name: Build wheel on Windows (Python 3.10)
+    runs-on: windows-2022
+    steps:
+      - name: Checkout this repo (for workflow + inject script)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Clone mozilla/translations inference engine
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/mozilla/translations.git mozilla-src 2>&1
+          echo "Cloned successfully"
+
+      - name: Clone browsermt/bergamot-translator for Python bindings
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/browsermt/bergamot-translator.git bergamot-src 2>&1
+          echo "Cloned successfully"
+
+      - name: Copy Python bindings into inference engine
+        shell: pwsh
+        run: |
+          # Copy the bindings/python directory
+          Copy-Item -Recurse "bergamot-src/bindings" "mozilla-src/inference/bindings"
+          echo "Copied Python bindings"
+
+          # Copy setup.py and pyproject.toml from browsermt
+          Copy-Item "bergamot-src/setup.py" "mozilla-src/inference/setup.py"
+          Copy-Item "bergamot-src/pyproject.toml" "mozilla-src/inference/pyproject.toml"
+          
+          # Read the existing CMakeLists.txt and add bindings/python subdirectory
+          $cmake = Get-Content "mozilla-src/inference/CMakeLists.txt" -Raw
+          $cmake = $cmake.Replace(
+            'option(COMPILE_PYTHON "Compile python bindings. Intended to be activated with setup.py" OFF)',
+            'option(COMPILE_PYTHON "Compile python bindings. Intended to be activated with setup.py" ON)'
+          )
+          Set-Content "mozilla-src/inference/CMakeLists.txt" $cmake
+          echo "Patched CMakeLists.txt"
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install requests pyyaml appdirs cmake ninja
+
+      - name: Install vcpkg dependencies
+        run: |
+          C:\vcpkg\vcpkg install pcre2:x64-windows-static
+          echo "CMAKE_PREFIX_PATH=C:\vcpkg\installed\x64-windows-static" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build wheel
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: 2
+          CMAKE_ARGS: "-DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DSSPLIT_USE_INTERNAL_PCRE2=OFF"
+        run: |
+          cd mozilla-src/inference
+          python -m pip wheel --no-build-isolation --no-deps -w ../../wheelhouse .
+
+      - name: Find and inject .pyd
+        run: |
+          $pyd = Get-ChildItem -Recurse -Filter "_bergamot*.pyd" | Select-Object -First 1
+          if ($pyd) {
+            $wheel = Get-ChildItem wheelhouse/*.whl | Select-Object -First 1
+            python .github/scripts/inject_pyd.py
+          } else {
+            echo "NO_PYD_FOUND"
+          }
+
+      - name: Verify wheel
+        run: |
+          python -c "import zipfile; import glob; z = zipfile.ZipFile(glob.glob('wheelhouse/*.whl')[0]); [print(n, z.getinfo(n).file_size, 'bytes') for n in z.namelist()]"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bergamot-wheel-cp3.10-windows-mozilla
+          path: wheelhouse/*.whl
+
+  create_release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build_windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+      - uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          files: bergamot-wheel-cp3.10-windows-mozilla/*.whl
+          generate_release_notes: true
